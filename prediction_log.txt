@@ -1,0 +1,7 @@
+Time,Actual,Model_Prediction,Random_Prediction,Model_Error,Random_Error,Model_Position,Random_Position,Winner
+2025-04-08 18:24:04,9.68,3.45,2.02,6.23,7.66,below,below,model
+2025-04-08 18:24:10,9.68,3.45,2.02,6.23,7.66,below,below,model
+2025-04-08 18:24:16,9.68,3.45,2.02,6.23,7.66,below,below,model
+2025-04-08 18:24:25,9.68,3.45,2.02,6.23,7.66,below,below,model
+2025-04-08 18:24:31,1.15,3.45,2.02,2.30,0.87,above,above,random
+2025-04-08 18:24:37,1.15,3.45,2.02,2.30,0.87,above,above,random

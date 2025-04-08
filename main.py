@@ -32,14 +32,17 @@ def show_menu():
     print("3. Start training with loaded model")
     print("4. Test loaded model")
     print("5. Test and compare all models")
+    print("6. Predict next number")
+    print("7. Analyze predictions with statistics")
+    print("8. Analyze predictions with saving and graph")
     print("0. Exit")
     
     while True:
         try:
-            choice = int(input("\nEnter your choice (0-5): "))
-            if 0 <= choice <= 5:
+            choice = int(input("\nEnter your choice (0-8): "))
+            if 0 <= choice <= 8:
                 return choice
-            print("Please enter a number between 0 and 5")
+            print("Please enter a number between 0 and 8")
         except ValueError:
             print("Please enter a valid number")
 
@@ -229,6 +232,7 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
         print(f"\nStarting training iteration {version//3 + 1}...")
         best_iteration_mae = float('inf')
         best_iteration_version = None
+        best_points_above = float('inf')  # Track points above line
 
         # Get current predictions and analyze errors
         current_predictions = predictor.predict(X_test)
@@ -256,7 +260,7 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
                 weights = predictor.model.get_weights()
                 predictor.model = Sequential.from_config(model_config)
                 predictor.model.set_weights(weights)
-                # Recompile the model
+                # Recompile the model with adjusted learning rate
                 predictor.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_absolute_error'])
             else:
                 predictor.create_model(input_shape=(X_train.shape[1], 1))
@@ -267,19 +271,27 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
             # Evaluate
             stats = predictor.evaluate_model(X_test, y_test)
             current_mae = stats['mae']
-            print(f"Version {current_version} - Test Loss: {stats['loss']:.4f}, MAE: {current_mae:.4f}")
             
-            # Save if better than current iteration best
-            if current_mae < best_iteration_mae:
+            # Calculate points above line
+            predictions = predictor.predict(X_test)
+            points_above = np.sum(predictions.flatten() > y_test)
+            
+            print(f"Version {current_version} - Test Loss: {stats['loss']:.4f}, MAE: {current_mae:.4f}")
+            print(f"Points above line: {points_above}")
+            
+            # Save if better than current iteration best (consider both MAE and points above)
+            if (points_above < best_points_above) or (points_above == best_points_above and current_mae < best_iteration_mae):
                 best_iteration_mae = current_mae
+                best_points_above = points_above
                 best_iteration_version = current_version
                 predictor.save_model(current_version)
 
         # Check if we improved over base model
-        if best_iteration_mae < base_mae:
+        if best_points_above < np.sum(predictor.predict(X_test).flatten() > y_test) or (best_points_above == np.sum(predictor.predict(X_test).flatten() > y_test) and best_iteration_mae < base_mae):
             improvement_count += 1
             no_improvement_count = 0
             print(f"\nImprovement found! New best MAE: {best_iteration_mae:.4f} (was {base_mae:.4f})")
+            print(f"Points above line reduced to: {best_points_above}")
             base_mae = best_iteration_mae
             
             # Save as new best model
@@ -291,7 +303,7 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
             plt.figure(figsize=(12, 6))
             plt.plot(y_test, label='Actual')
             plt.plot(predictions, label='Predicted')
-            plt.title(f'Time Series Prediction (New Best Model - MAE: {base_mae:.4f})')
+            plt.title(f'Time Series Prediction (New Best Model - MAE: {base_mae:.4f}, Points Above: {best_points_above})')
             plt.xlabel('Time')
             plt.ylabel('Value')
             plt.legend()
@@ -299,6 +311,7 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
         else:
             no_improvement_count += 1
             print(f"\nNo improvement in this iteration. Best MAE remains: {base_mae:.4f}")
+            print(f"Points above line: {best_points_above}")
             if no_improvement_count >= max_no_improvement:
                 print(f"\nNo improvement after {max_no_improvement} iterations. Stopping training.")
                 break
@@ -313,11 +326,447 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
     print("\nTraining complete!")
     print(f"Total improvements: {improvement_count}")
     print(f"Final best MAE: {base_mae:.4f}")
+    print(f"Final points above line: {best_points_above}")
+
+def predict_next_number(predictor: TimeSeriesPredictor, data_fetcher: DataFetcher):
+    """Fetch latest data and predict the next number."""
+    if predictor.model is None:
+        print("No model loaded. Please load or create a model first.")
+        return
+
+    # Ask user how many last numbers to use
+    while True:
+        try:
+            sequence_length = int(input("\nHow many last numbers to use for prediction? (default is 30): ") or "30")
+            if sequence_length > 0:
+                break
+            print("Please enter a positive number")
+        except ValueError:
+            print("Please enter a valid number")
+
+    print("\nStarting automatic prediction updates...")
+    print("Press Ctrl+C to stop")
+    
+    try:
+        # Store initial data length
+        initial_data = data_fetcher.fetch_data()
+        predictor.last_prediction_data = initial_data.copy()
+        
+        while True:
+            try:
+                # Get latest data
+                data = data_fetcher.fetch_data()
+                
+                # Check if we have new data
+                if len(data) > len(predictor.last_prediction_data):
+                    # New number has appeared - this was our previous prediction
+                    new_number = data[-1]
+                    print(f"\nNew number appeared: {new_number:.2f}")
+                    print(f"This was our previous prediction: {predictor.last_prediction:.2f}")
+                    print(f"Difference: {abs(new_number - predictor.last_prediction):.2f}")
+                
+                # Store current data and make new prediction
+                predictor.last_prediction_data = data.copy()
+                
+                # Prepare the last sequence for prediction
+                last_sequence = data[-sequence_length:]
+                last_sequence = np.clip(last_sequence, 1, 10)  # Normalize to 1-10 range
+                
+                # Reshape data to match model's expected input shape
+                X = last_sequence.reshape(1, sequence_length, 1)
+                
+                # Make prediction
+                prediction = predictor.predict(X)[0][0]
+                prediction = np.clip(prediction, 1, 10)  # Ensure prediction is in 1-10 range
+                predictor.last_prediction = prediction  # Store prediction for next comparison
+                
+                print(f"\nLast {sequence_length} numbers: {last_sequence}")
+                print(f"Predicted next number: {prediction:.2f}")
+                
+                # Wait for 5 seconds before next update
+                time.sleep(5)
+                
+            except KeyboardInterrupt:
+                print("\nStopping automatic updates...")
+                break
+            except Exception as e:
+                print(f"Error during prediction: {str(e)}")
+                time.sleep(5)  # Wait before retrying
+        
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")
+        print(f"Data shape: {X.shape if 'X' in locals() else 'Not created'}")
+        print(f"Last sequence shape: {last_sequence.shape if 'last_sequence' in locals() else 'Not created'}")
+
+def analyze_predictions(predictor: TimeSeriesPredictor, data_fetcher: DataFetcher):
+    """Analyze predictions with detailed statistics."""
+    if predictor.model is None:
+        print("No model loaded. Please load or create a model first.")
+        return
+
+    # Initialize statistics
+    predictor.prediction_stats = {
+        'total_predictions': 0,
+        'predictions_above': 0,
+        'predictions_below': 0,
+        'exact_predictions': 0,
+        'total_error': 0,
+        'last_10_errors': []
+    }
+
+    # Ask user how many last numbers to use
+    while True:
+        try:
+            sequence_length = int(input("\nHow many last numbers to use for prediction? (default is 30): ") or "30")
+            if sequence_length > 0:
+                break
+            print("Please enter a positive number")
+        except ValueError:
+            print("Please enter a valid number")
+
+    print("\nStarting prediction analysis...")
+    print("Press Ctrl+C to stop")
+    
+    try:
+        # Store initial data length
+        initial_data = data_fetcher.fetch_data()
+        predictor.last_prediction_data = initial_data.copy()
+        
+        while True:
+            try:
+                # Get latest data
+                data = data_fetcher.fetch_data()
+                
+                # Check if we have new data
+                if len(data) > len(predictor.last_prediction_data):
+                    # New number has appeared - analyze previous prediction
+                    new_number = data[-1]
+                    error = abs(new_number - predictor.last_prediction)
+                    
+                    # Update statistics
+                    predictor.prediction_stats['total_predictions'] += 1
+                    predictor.prediction_stats['total_error'] += error
+                    predictor.prediction_stats['last_10_errors'].append(error)
+                    if len(predictor.prediction_stats['last_10_errors']) > 10:
+                        predictor.prediction_stats['last_10_errors'].pop(0)
+                    
+                    if new_number > predictor.last_prediction:
+                        predictor.prediction_stats['predictions_below'] += 1
+                    elif new_number < predictor.last_prediction:
+                        predictor.prediction_stats['predictions_above'] += 1
+                    else:
+                        predictor.prediction_stats['exact_predictions'] += 1
+                    
+                    # Print analysis
+                    print("\n" + "="*50)
+                    print(f"New number appeared: {new_number:.2f}")
+                    print(f"Previous prediction: {predictor.last_prediction:.2f}")
+                    print(f"Error: {error:.2f}")
+                    print("\nStatistics:")
+                    print(f"Total predictions: {predictor.prediction_stats['total_predictions']}")
+                    print(f"Predictions above actual: {predictor.prediction_stats['predictions_above']}")
+                    print(f"Predictions below actual: {predictor.prediction_stats['predictions_below']}")
+                    print(f"Exact predictions: {predictor.prediction_stats['exact_predictions']}")
+                    print(f"Average error: {predictor.prediction_stats['total_error']/predictor.prediction_stats['total_predictions']:.2f}")
+                    print(f"Last 10 errors: {[f'{e:.2f}' for e in predictor.prediction_stats['last_10_errors']]}")
+                    print("="*50)
+                
+                # Store current data and make new prediction
+                predictor.last_prediction_data = data.copy()
+                
+                # Prepare the last sequence for prediction
+                last_sequence = data[-sequence_length:]
+                last_sequence = np.clip(last_sequence, 1, 10)  # Normalize to 1-10 range
+                
+                # Reshape data to match model's expected input shape
+                X = last_sequence.reshape(1, sequence_length, 1)
+                
+                # Make prediction
+                prediction = predictor.predict(X)[0][0]
+                prediction = np.clip(prediction, 1, 10)  # Ensure prediction is in 1-10 range
+                predictor.last_prediction = prediction  # Store prediction for next comparison
+                
+                print(f"\nLast {sequence_length} numbers: {last_sequence}")
+                print(f"Predicted next number: {prediction:.2f}")
+                
+                # Wait for 5 seconds before next update
+                time.sleep(5)
+                
+            except KeyboardInterrupt:
+                print("\nStopping prediction analysis...")
+                break
+            except Exception as e:
+                print(f"Error during prediction: {str(e)}")
+                time.sleep(5)  # Wait before retrying
+        
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")
+        print(f"Data shape: {X.shape if 'X' in locals() else 'Not created'}")
+        print(f"Last sequence shape: {last_sequence.shape if 'last_sequence' in locals() else 'Not created'}")
+
+def analyze_and_save_predictions(predictor: TimeSeriesPredictor, data_fetcher: DataFetcher):
+    """Analyze predictions with detailed statistics, save to file and show live graph."""
+    if predictor.model is None:
+        print("No model loaded. Please load or create a model first.")
+        return
+
+    # Initialize statistics
+    predictor.prediction_stats = {
+        'total_predictions': 0,
+        'predictions_above': 0,
+        'predictions_below': 0,
+        'exact_predictions': 0,
+        'total_error': 0,
+        'last_10_errors': [],
+        'all_predictions': [],
+        'all_actuals': [],
+        'all_errors': [],
+        'points_above_line': 0,
+        'points_below_line': 0,
+        'points_on_line': 0
+    }
+
+    # Create or clear the log file
+    with open('prediction_log.txt', 'w') as f:
+        f.write("Time,Actual,Prediction,Error,Position\n")
+
+    # Ask user how many last numbers to use
+    while True:
+        try:
+            sequence_length = int(input("\nHow many last numbers to use for prediction? (default is 30): ") or "30")
+            if sequence_length > 0:
+                break
+            print("Please enter a positive number")
+        except ValueError:
+            print("Please enter a valid number")
+
+    print("\nStarting prediction analysis with saving...")
+    print("Press Ctrl+C to stop")
+    
+    # Initialize the plot with four subplots
+    plt.ion()  # Turn on interactive mode
+    fig = plt.figure(figsize=(7.5, 6))  # Half the original size
+    gs = fig.add_gridspec(2, 2)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, 0])
+    ax4 = fig.add_subplot(gs[1, 1])
+    
+    # Add figure size adjustment controls
+    fig.subplots_adjust(bottom=0.2)
+    ax_width = plt.axes([0.2, 0.1, 0.65, 0.03])
+    ax_height = plt.axes([0.2, 0.05, 0.65, 0.03])
+    
+    width_slider = plt.Slider(ax_width, 'Width', 5, 10, valinit=7.5)  # Half the original range
+    height_slider = plt.Slider(ax_height, 'Height', 4, 8, valinit=6)  # Half the original range
+    
+    def update_figure_size(val):
+        fig.set_size_inches(width_slider.val, height_slider.val)
+        fig.canvas.draw_idle()
+    
+    width_slider.on_changed(update_figure_size)
+    height_slider.on_changed(update_figure_size)
+    
+    # Initialize plot lines and scatter
+    line1, = ax1.plot([], [], 'b-', label='Actual')
+    line2, = ax1.plot([], [], 'r--', label='Predicted')
+    line3, = ax2.plot([], [], 'g-')
+    scatter_above, = ax3.plot([], [], 'ro', alpha=0.5, label='Above Line')
+    scatter_below, = ax3.plot([], [], 'go', alpha=0.5, label='Below Line')
+    scatter_on, = ax3.plot([], [], 'bo', alpha=0.5, label='On Line')
+    line4, = ax3.plot([], [], 'k-', label='Perfect Prediction')
+    line5, = ax4.plot([], [], 'b-', label='Actual')
+    line6, = ax4.plot([], [], 'r--', label='Predicted')
+    scatter2, = ax4.plot([], [], 'go', alpha=0.5, label='Deviation Points')
+    
+    # Set titles and labels
+    ax1.set_title('Actual vs Predicted Values')
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('Value')
+    ax1.legend()
+    ax1.grid(True)
+    
+    ax2.set_title('Prediction Error Over Time')
+    ax2.set_xlabel('Time')
+    ax2.set_ylabel('Error')
+    ax2.grid(True)
+    
+    ax3.set_title('Actual vs Predicted Scatter Plot')
+    ax3.set_xlabel('Actual Values')
+    ax3.set_ylabel('Predicted Values')
+    ax3.legend()
+    ax3.grid(True)
+    
+    ax4.set_title('Deviation Analysis')
+    ax4.set_xlabel('Time')
+    ax4.set_ylabel('Value')
+    ax4.legend()
+    ax4.grid(True)
+    
+    # Set perfect prediction line
+    ax3.plot([1, 10], [1, 10], 'k-', label='Perfect Prediction')
+    
+    plt.tight_layout()
+    
+    try:
+        # Store initial data length
+        initial_data = data_fetcher.fetch_data()
+        predictor.last_prediction_data = initial_data.copy()
+        
+        while True:
+            try:
+                # Get latest data
+                data = data_fetcher.fetch_data()
+                
+                # Check if we have new data
+                if len(data) > len(predictor.last_prediction_data):
+                    # New number has appeared - analyze previous prediction
+                    new_number = data[-1]
+                    # Normalize actual value to 1-10 range
+                    normalized_actual = np.clip(new_number, 1, 10)
+                    error = abs(normalized_actual - predictor.last_prediction)
+                    
+                    # Determine position relative to perfect prediction line
+                    position = "above" if predictor.last_prediction > normalized_actual else "below" if predictor.last_prediction < normalized_actual else "on"
+                    
+                    # Update position statistics
+                    if position == "above":
+                        predictor.prediction_stats['points_above_line'] += 1
+                    elif position == "below":
+                        predictor.prediction_stats['points_below_line'] += 1
+                    else:
+                        predictor.prediction_stats['points_on_line'] += 1
+                    
+                    # Update statistics
+                    predictor.prediction_stats['total_predictions'] += 1
+                    predictor.prediction_stats['total_error'] += error
+                    predictor.prediction_stats['last_10_errors'].append(error)
+                    if len(predictor.prediction_stats['last_10_errors']) > 10:
+                        predictor.prediction_stats['last_10_errors'].pop(0)
+                    
+                    predictor.prediction_stats['all_predictions'].append(predictor.last_prediction)
+                    predictor.prediction_stats['all_actuals'].append(normalized_actual)
+                    predictor.prediction_stats['all_errors'].append(error)
+                    
+                    if normalized_actual > predictor.last_prediction:
+                        predictor.prediction_stats['predictions_below'] += 1
+                    elif normalized_actual < predictor.last_prediction:
+                        predictor.prediction_stats['predictions_above'] += 1
+                    else:
+                        predictor.prediction_stats['exact_predictions'] += 1
+                    
+                    # Save to log file
+                    with open('prediction_log.txt', 'a') as f:
+                        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{normalized_actual:.2f},{predictor.last_prediction:.2f},{error:.2f},{position}\n")
+                    
+                    # Print analysis
+                    print("\n" + "="*50)
+                    print(f"New number appeared: {new_number:.2f} (normalized to {normalized_actual:.2f})")
+                    print(f"Previous prediction: {predictor.last_prediction:.2f}")
+                    print(f"Error: {error:.2f}")
+                    print(f"Position relative to line: {position}")
+                    print("\nStatistics:")
+                    print(f"Total predictions: {predictor.prediction_stats['total_predictions']}")
+                    print(f"Points above line: {predictor.prediction_stats['points_above_line']}")
+                    print(f"Points below line: {predictor.prediction_stats['points_below_line']}")
+                    print(f"Points on line: {predictor.prediction_stats['points_on_line']}")
+                    print(f"Predictions above actual: {predictor.prediction_stats['predictions_above']}")
+                    print(f"Predictions below actual: {predictor.prediction_stats['predictions_below']}")
+                    print(f"Exact predictions: {predictor.prediction_stats['exact_predictions']}")
+                    print(f"Average error: {predictor.prediction_stats['total_error']/predictor.prediction_stats['total_predictions']:.2f}")
+                    print(f"Last 10 errors: {[f'{e:.2f}' for e in predictor.prediction_stats['last_10_errors']]}")
+                    print("="*50)
+                    
+                    # Update plot data
+                    x = range(len(predictor.prediction_stats['all_actuals']))
+                    
+                    # Update lines
+                    line1.set_data(x, predictor.prediction_stats['all_actuals'])
+                    line2.set_data(x, predictor.prediction_stats['all_predictions'])
+                    line3.set_data(x, predictor.prediction_stats['all_errors'])
+                    
+                    # Update scatter plot with different colors for points above/below/on line
+                    above_mask = np.array(predictor.prediction_stats['all_predictions']) > np.array(predictor.prediction_stats['all_actuals'])
+                    below_mask = np.array(predictor.prediction_stats['all_predictions']) < np.array(predictor.prediction_stats['all_actuals'])
+                    on_mask = np.array(predictor.prediction_stats['all_predictions']) == np.array(predictor.prediction_stats['all_actuals'])
+                    
+                    scatter_above.set_data(
+                        np.array(predictor.prediction_stats['all_actuals'])[above_mask],
+                        np.array(predictor.prediction_stats['all_predictions'])[above_mask]
+                    )
+                    scatter_below.set_data(
+                        np.array(predictor.prediction_stats['all_actuals'])[below_mask],
+                        np.array(predictor.prediction_stats['all_predictions'])[below_mask]
+                    )
+                    scatter_on.set_data(
+                        np.array(predictor.prediction_stats['all_actuals'])[on_mask],
+                        np.array(predictor.prediction_stats['all_predictions'])[on_mask]
+                    )
+                    
+                    # Update deviation analysis plot
+                    line5.set_data(x, predictor.prediction_stats['all_actuals'])
+                    line6.set_data(x, predictor.prediction_stats['all_predictions'])
+                    
+                    # Find points with significant deviation
+                    significant_deviation = np.where(np.array(predictor.prediction_stats['all_errors']) > 1.0)[0]
+                    if len(significant_deviation) > 0:
+                        scatter2.set_data(significant_deviation, 
+                                        [predictor.prediction_stats['all_actuals'][i] for i in significant_deviation])
+                    
+                    # Update axes limits
+                    ax1.set_xlim(0, len(x))
+                    ax1.set_ylim(0, 11)
+                    ax2.set_xlim(0, len(x))
+                    ax2.set_ylim(0, max(predictor.prediction_stats['all_errors']) * 1.1 if predictor.prediction_stats['all_errors'] else 1)
+                    ax3.set_xlim(0, 11)
+                    ax3.set_ylim(0, 11)
+                    ax4.set_xlim(0, len(x))
+                    ax4.set_ylim(0, 11)
+                    
+                    # Draw the plot
+                    fig.canvas.draw()
+                    fig.canvas.flush_events()
+                
+                # Store current data and make new prediction
+                predictor.last_prediction_data = data.copy()
+                
+                # Prepare the last sequence for prediction
+                last_sequence = data[-sequence_length:]
+                last_sequence = np.clip(last_sequence, 1, 10)  # Normalize to 1-10 range
+                
+                # Reshape data to match model's expected input shape
+                X = last_sequence.reshape(1, sequence_length, 1)
+                
+                # Make prediction
+                prediction = predictor.predict(X)[0][0]
+                prediction = np.clip(prediction, 1, 10)  # Ensure prediction is in 1-10 range
+                predictor.last_prediction = prediction  # Store prediction for next comparison
+                
+                print(f"\nLast {sequence_length} numbers: {last_sequence}")
+                print(f"Predicted next number: {prediction:.2f}")
+                
+                # Wait for 5 seconds before next update
+                time.sleep(5)
+                
+            except KeyboardInterrupt:
+                print("\nStopping prediction analysis...")
+                break
+            except Exception as e:
+                print(f"Error during prediction: {str(e)}")
+                time.sleep(5)  # Wait before retrying
+        
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")
+        print(f"Data shape: {X.shape if 'X' in locals() else 'Not created'}")
+        print(f"Last sequence shape: {last_sequence.shape if 'last_sequence' in locals() else 'Not created'}")
+    finally:
+        plt.ioff()  # Turn off interactive mode
+        plt.close()  # Close the plot
 
 def main():
     # Initialize components
-    data_fetcher = DataFetcher()
-    predictor = TimeSeriesPredictor(sequence_length=10)
+    data_fetcher = DataFetcher(sequence_length=30)
+    predictor = TimeSeriesPredictor(sequence_length=30)
 
     # Fetch and prepare data
     print("Fetching data...")
@@ -356,6 +805,15 @@ def main():
             
         elif choice == 5:
             test_all_models(predictor, X_test, y_test)
+            
+        elif choice == 6:
+            predict_next_number(predictor, data_fetcher)
+            
+        elif choice == 7:
+            analyze_predictions(predictor, data_fetcher)
+            
+        elif choice == 8:
+            analyze_and_save_predictions(predictor, data_fetcher)
 
 if __name__ == "__main__":
     main() 
