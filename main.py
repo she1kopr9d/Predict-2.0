@@ -6,6 +6,20 @@ import time
 import os
 import glob
 from tensorflow.keras.models import Sequential
+import tensorflow as tf
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+
+# Configure GPU memory growth to prevent memory issues
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"GPU available: {gpus}")
+    except RuntimeError as e:
+        print(e)
+else:
+    print("No GPU available, using CPU")
 
 def train_iteration(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train: np.ndarray,
                    X_test: np.ndarray, y_test: np.ndarray, version: int) -> dict:
@@ -227,12 +241,18 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
     improvement_count = 0
     no_improvement_count = 0
     max_no_improvement = 3  # Stop if no improvement after 3 iterations
+    best_accuracy_above_2 = 0
+    best_accuracy_above_1_5 = 0
+    best_val_loss = float('inf')
+
+    # Enable mixed precision for better GPU performance
+    tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
     while True:
         print(f"\nStarting training iteration {version//3 + 1}...")
         best_iteration_mae = float('inf')
         best_iteration_version = None
-        best_points_above = float('inf')  # Track points above line
+        best_points_above = float('inf')
 
         # Get current predictions and analyze errors
         current_predictions = predictor.predict(X_test)
@@ -260,13 +280,17 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
                 weights = predictor.model.get_weights()
                 predictor.model = Sequential.from_config(model_config)
                 predictor.model.set_weights(weights)
-                # Recompile the model with adjusted learning rate
-                predictor.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_absolute_error'])
+                # Recompile the model with adjusted learning rate and mixed precision
+                predictor.model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                    loss='mean_squared_error',
+                    metrics=['mean_absolute_error']
+                )
             else:
                 predictor.create_model(input_shape=(X_train.shape[1], 1))
             
-            # Train with more epochs for fine-tuning
-            predictor.train_model(X_train_combined, y_train_combined, X_test, y_test, epochs=30)
+            # Train with early stopping to prevent overfitting
+            history = predictor.train_model(X_train_combined, y_train_combined, X_test, y_test, epochs=30)
             
             # Evaluate
             stats = predictor.evaluate_model(X_test, y_test)
@@ -276,23 +300,41 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
             predictions = predictor.predict(X_test)
             points_above = np.sum(predictions.flatten() > y_test)
             
+            # Calculate accuracy for new thresholds
+            accuracy_above_2 = np.mean((predictions.flatten() > 2) == (y_test > 2))
+            accuracy_above_1_5 = np.mean((predictions.flatten() > 1.5) == (y_test > 1.5))
+            
+            # Get validation loss from history
+            val_loss = min(history.history['val_loss'])
+            
             print(f"Version {current_version} - Test Loss: {stats['loss']:.4f}, MAE: {current_mae:.4f}")
             print(f"Points above line: {points_above}")
+            print(f"Accuracy above 2: {accuracy_above_2:.4f}")
+            print(f"Accuracy above 1.5: {accuracy_above_1_5:.4f}")
+            print(f"Validation Loss: {val_loss:.4f}")
             
-            # Save if better than current iteration best (consider both MAE and points above)
-            if (points_above < best_points_above) or (points_above == best_points_above and current_mae < best_iteration_mae):
+            # Save if better than current iteration best (consider multiple metrics)
+            if (accuracy_above_2 > best_accuracy_above_2 or 
+                (accuracy_above_2 == best_accuracy_above_2 and accuracy_above_1_5 > best_accuracy_above_1_5) or
+                (accuracy_above_2 == best_accuracy_above_2 and accuracy_above_1_5 == best_accuracy_above_1_5 and val_loss < best_val_loss)):
                 best_iteration_mae = current_mae
                 best_points_above = points_above
                 best_iteration_version = current_version
+                best_accuracy_above_2 = accuracy_above_2
+                best_accuracy_above_1_5 = accuracy_above_1_5
+                best_val_loss = val_loss
                 predictor.save_model(current_version)
 
         # Check if we improved over base model
-        if best_points_above < np.sum(predictor.predict(X_test).flatten() > y_test) or (best_points_above == np.sum(predictor.predict(X_test).flatten() > y_test) and best_iteration_mae < base_mae):
+        if (best_accuracy_above_2 > np.mean((predictor.predict(X_test).flatten() > 2) == (y_test > 2)) or
+            (best_accuracy_above_2 == np.mean((predictor.predict(X_test).flatten() > 2) == (y_test > 2)) and
+             best_accuracy_above_1_5 > np.mean((predictor.predict(X_test).flatten() > 1.5) == (y_test > 1.5)))):
             improvement_count += 1
             no_improvement_count = 0
-            print(f"\nImprovement found! New best MAE: {best_iteration_mae:.4f} (was {base_mae:.4f})")
-            print(f"Points above line reduced to: {best_points_above}")
-            base_mae = best_iteration_mae
+            print(f"\nImprovement found!")
+            print(f"Accuracy above 2: {best_accuracy_above_2:.4f}")
+            print(f"Accuracy above 1.5: {best_accuracy_above_1_5:.4f}")
+            print(f"Validation Loss: {best_val_loss:.4f}")
             
             # Save as new best model
             os.rename(f'model_v{best_iteration_version}.keras', 'best_model.keras')
@@ -303,15 +345,18 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
             plt.figure(figsize=(12, 6))
             plt.plot(y_test, label='Actual')
             plt.plot(predictions, label='Predicted')
-            plt.title(f'Time Series Prediction (New Best Model - MAE: {base_mae:.4f}, Points Above: {best_points_above})')
+            plt.axhline(y=2, color='r', linestyle='--', label='Threshold 2')
+            plt.axhline(y=1.5, color='g', linestyle='--', label='Threshold 1.5')
+            plt.title(f'Time Series Prediction (New Best Model)\nAccuracy above 2: {best_accuracy_above_2:.4f}, above 1.5: {best_accuracy_above_1_5:.4f}')
             plt.xlabel('Time')
             plt.ylabel('Value')
             plt.legend()
             plt.show()
         else:
             no_improvement_count += 1
-            print(f"\nNo improvement in this iteration. Best MAE remains: {base_mae:.4f}")
-            print(f"Points above line: {best_points_above}")
+            print(f"\nNo improvement in this iteration.")
+            print(f"Best accuracy above 2: {best_accuracy_above_2:.4f}")
+            print(f"Best accuracy above 1.5: {best_accuracy_above_1_5:.4f}")
             if no_improvement_count >= max_no_improvement:
                 print(f"\nNo improvement after {max_no_improvement} iterations. Stopping training.")
                 break
@@ -325,8 +370,9 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
 
     print("\nTraining complete!")
     print(f"Total improvements: {improvement_count}")
-    print(f"Final best MAE: {base_mae:.4f}")
-    print(f"Final points above line: {best_points_above}")
+    print(f"Final accuracy above 2: {best_accuracy_above_2:.4f}")
+    print(f"Final accuracy above 1.5: {best_accuracy_above_1_5:.4f}")
+    print(f"Final validation loss: {best_val_loss:.4f}")
 
 def predict_next_number(predictor: TimeSeriesPredictor, data_fetcher: DataFetcher):
     """Fetch latest data and predict the next number."""
