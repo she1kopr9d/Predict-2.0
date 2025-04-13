@@ -1,13 +1,13 @@
-from data_fetcher import DataFetcher
-from model import TimeSeriesPredictor
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 import numpy as np
 import matplotlib.pyplot as plt
 import time
 import os
 import glob
-from tensorflow.keras.models import Sequential
-import tensorflow as tf
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from data_fetcher import DataFetcher
+from model import TimeSeriesPredictor
 
 # Configure GPU memory growth to prevent memory issues
 gpus = tf.config.list_physical_devices('GPU')
@@ -20,6 +20,9 @@ if gpus:
         print(e)
 else:
     print("No GPU available, using CPU")
+
+# Enable mixed precision for better GPU performance
+tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 def train_iteration(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train: np.ndarray,
                    X_test: np.ndarray, y_test: np.ndarray, version: int) -> dict:
@@ -244,9 +247,6 @@ def start_training(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train:
     best_accuracy_above_2 = 0
     best_accuracy_above_1_5 = 0
     best_val_loss = float('inf')
-
-    # Enable mixed precision for better GPU performance
-    tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
     while True:
         print(f"\nStarting training iteration {version//3 + 1}...")
