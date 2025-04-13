@@ -9,17 +9,39 @@ import glob
 from data_fetcher import DataFetcher
 from model import TimeSeriesPredictor
 
-# Configure GPU for Google Colab
+# Configure GPU for optimal performance
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
-        # Set memory growth for all GPUs
+        # Enable memory growth
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        # Set visible devices to GPU
+        
+        # Set TensorFlow to use the first GPU
         tf.config.set_visible_devices(gpus[0], 'GPU')
-        print(f"GPU available: {gpus[0]}")
-        print("TensorFlow will use GPU for training")
+        logical_gpus = tf.config.list_logical_devices('GPU')
+        print(f"Physical GPUs: {len(gpus)}, Logical GPUs: {len(logical_gpus)}")
+        
+        # Configure for mixed precision training
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        print("Mixed precision policy:", policy.name)
+        
+        # Optimize TensorFlow operations
+        tf.config.optimizer.set_jit(True)  # Enable XLA optimization
+        tf.config.optimizer.set_experimental_options({
+            'layout_optimizer': True,
+            'constant_folding': True,
+            'shape_optimization': True,
+            'remapping': True,
+            'arithmetic_optimization': True,
+            'dependency_optimization': True,
+            'loop_optimization': True,
+            'function_optimization': True,
+            'debug_stripper': True,
+        })
+        
+        print("GPU configuration completed successfully")
     except RuntimeError as e:
         print(e)
 else:
@@ -29,7 +51,7 @@ else:
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Force TensorFlow to use GPU
-with tf.device('/device:GPU:0'):
+with tf.device('GPU:0'):
     print("TensorFlow is configured to use GPU")
 
 def train_iteration(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train: np.ndarray,

@@ -27,22 +27,27 @@ class TimeSeriesPredictor:
             json.dump(self.model_stats, f, indent=4)
 
     def create_model(self, input_shape: Tuple[int, int]) -> Sequential:
-        """Create a new LSTM model for time series prediction."""
+        """Create a new LSTM model optimized for GPU training."""
         model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=input_shape),
-            Dropout(0.2),
-            LSTM(50, return_sequences=False),
-            Dropout(0.2),
-            Dense(25),
+            LSTM(128, return_sequences=True, input_shape=input_shape, activation='tanh'),
+            Dropout(0.1),
+            LSTM(64, return_sequences=False, activation='tanh'),
+            Dropout(0.1),
+            Dense(32, activation='relu'),
             Dense(1)
         ])
         
-        model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_absolute_error'])
+        # Optimize for GPU with mixed precision
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+            loss='mean_squared_error',
+            metrics=['mean_absolute_error']
+        )
         self.model = model
         return model
 
     def train_model(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray, epochs: int = 50, batch_size: int = 32) -> tf.keras.callbacks.History:
-        """Train the model with GPU support."""
+        """Train the model with GPU optimization."""
         if self.model is None:
             raise ValueError("Model not created. Call create_model first.")
         
@@ -52,19 +57,25 @@ class TimeSeriesPredictor:
         X_val = X_val.astype('float32')
         y_val = y_val.astype('float32')
         
-        # Force training on GPU
-        with tf.device('/device:GPU:0'):
+        # Force training on GPU with optimized parameters
+        with tf.device('GPU:0'):
             history = self.model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
                 epochs=epochs,
-                batch_size=batch_size,
+                batch_size=batch_size * 4,  # Increased batch size for GPU
                 verbose=1,
                 callbacks=[
                     tf.keras.callbacks.EarlyStopping(
                         monitor='val_loss',
-                        patience=5,
+                        patience=3,
                         restore_best_weights=True
+                    ),
+                    tf.keras.callbacks.ReduceLROnPlateau(
+                        monitor='val_loss',
+                        factor=0.5,
+                        patience=2,
+                        min_lr=1e-6
                     )
                 ]
             )
