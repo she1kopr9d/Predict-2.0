@@ -41,21 +41,35 @@ class TimeSeriesPredictor:
         self.model = model
         return model
 
-    def train_model(self, X_train: np.ndarray, y_train: np.ndarray, 
-                   X_val: np.ndarray, y_val: np.ndarray,
-                   epochs: int = 50, batch_size: int = 32) -> dict:
-        """Train the model on the provided data."""
+    def train_model(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray, epochs: int = 50, batch_size: int = 32) -> tf.keras.callbacks.History:
+        """Train the model with GPU support."""
         if self.model is None:
             raise ValueError("Model not created. Call create_model first.")
         
-        history = self.model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-        return history.history
+        # Convert data to float32 for GPU compatibility
+        X_train = X_train.astype('float32')
+        y_train = y_train.astype('float32')
+        X_val = X_val.astype('float32')
+        y_val = y_val.astype('float32')
+        
+        # Force training on GPU
+        with tf.device('/GPU:0'):
+            history = self.model.fit(
+                X_train, y_train,
+                validation_data=(X_val, y_val),
+                epochs=epochs,
+                batch_size=batch_size,
+                verbose=1,
+                callbacks=[
+                    tf.keras.callbacks.EarlyStopping(
+                        monitor='val_loss',
+                        patience=5,
+                        restore_best_weights=True
+                    )
+                ]
+            )
+        
+        return history
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions using the trained model."""
