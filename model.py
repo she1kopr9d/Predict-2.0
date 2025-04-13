@@ -53,7 +53,7 @@ class TimeSeriesPredictor:
         y_val = y_val.astype('float32')
         
         # Force training on GPU
-        with tf.device('/GPU:0'):
+        with tf.device('/device:GPU:0'):
             history = self.model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),

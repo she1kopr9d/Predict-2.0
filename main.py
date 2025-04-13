@@ -9,19 +9,15 @@ import glob
 from data_fetcher import DataFetcher
 from model import TimeSeriesPredictor
 
-# Configure GPU memory growth and force GPU usage
+# Configure GPU for Google Colab
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
-        # Restrict TensorFlow to only use the first GPU
+        # Set memory growth for all GPUs
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        # Set visible devices to GPU
         tf.config.set_visible_devices(gpus[0], 'GPU')
-        # Set memory growth to prevent memory issues
-        tf.config.experimental.set_memory_growth(gpus[0], True)
-        # Set memory limit to 90% of available GPU memory
-        tf.config.experimental.set_virtual_device_configuration(
-            gpus[0],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024*9)]  # 9GB limit
-        )
         print(f"GPU available: {gpus[0]}")
         print("TensorFlow will use GPU for training")
     except RuntimeError as e:
@@ -33,7 +29,7 @@ else:
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Force TensorFlow to use GPU
-with tf.device('/GPU:0'):
+with tf.device('/device:GPU:0'):
     print("TensorFlow is configured to use GPU")
 
 def train_iteration(predictor: TimeSeriesPredictor, X_train: np.ndarray, y_train: np.ndarray,
